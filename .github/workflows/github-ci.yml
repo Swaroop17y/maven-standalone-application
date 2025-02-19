@@ -1,0 +1,68 @@
+name: Build, Push, and Deploy to Ubuntu Server
+
+on:
+  push:
+    branches:
+      - cicd  # Change if needed
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      IMAGE_NAME: ghcr.io/workspacebuild/webapi
+      SHORT_SHA: ${{ steps.set-vars.outputs.SHORT_SHA }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Ensure commit history is available
+
+      - name: Set Variables
+        id: set-vars
+        run: |
+          IMAGE_NAME="ghcr.io/workspacebuild/webapi"
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_OUTPUT  # Output for next job
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u $GITHUB_ACTOR --password-stdin
+
+      - name: Build Docker Image
+        run: |
+          docker build -t $IMAGE_NAME:$SHORT_SHA -t $IMAGE_NAME:latest .
+
+      - name: Push Docker Image
+        run: |
+          docker push $IMAGE_NAME:$SHORT_SHA
+          docker push $IMAGE_NAME:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to Ubuntu Server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            IMAGE_NAME="ghcr.io/workspacebuild/webapi"
+            SHORT_SHA="${{ needs.build-and-push.outputs.SHORT_SHA }}"  # Pass from previous job
+            
+            echo "Logging into GitHub Container Registry..."
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+
+            echo "Pulling new Docker image..."
+            docker pull $IMAGE_NAME:$SHORT_SHA
+
+            echo "Stopping existing container (if any)..."
+            docker stop webapi || true
+            docker rm webapi || true
+
+            echo "Running new container..."
+            docker run -d --name webapi -p 4003:4003 $IMAGE_NAME:$SHORT_SHA
